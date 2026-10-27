@@ -1,20 +1,13 @@
-"""
-Video & Audio Downloader module for Kit (`kit dl <url>`).
-Uses the `yt_dlp` Python API if installed, or falls back to the `yt-dlp` CLI binary.
-Supports resolution selection, audio extraction, subtitle downloading, and time clipping.
-"""
-
-from __future__ import annotations
-
-import json
-import shutil
-import subprocess
+﻿from __future__ import annotations
+import json, os, shutil, subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
+from kit_py.auto_bootstrap import ensure_dependencies
 
+DEFAULT_DL_DIR = Path("D:/kit/downloads")
 
 def build_yt_dlp_options(
-    output_dir: Path,
+    output_dir: Path = DEFAULT_DL_DIR,
     quality: str = "1080",
     audio_only: bool = False,
     audio_format: str = "mp3",
@@ -22,12 +15,15 @@ def build_yt_dlp_options(
     subs: bool = False,
     info_only: bool = False,
 ) -> Dict[str, Any]:
-    """Constructs deterministic yt-dlp configuration dictionary."""
     output_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(output_dir / "%(title).120s [%(id)s].%(ext)s")
+    has_ffmpeg = shutil.which("ffmpeg") is not None
 
     if audio_only:
         fmt = "bestaudio/best"
+    elif not has_ffmpeg:
+        # Single-file MP4 fallback when ffmpeg is not installed
+        fmt = "best[ext=mp4]/best" if quality.lower() == "best" else f"best[height<={quality}][ext=mp4]/best[height<={quality}]/best"
     elif quality.lower() == "best":
         fmt = "bestvideo+bestaudio/best"
     else:
@@ -41,33 +37,18 @@ def build_yt_dlp_options(
         "writesubtitles": subs,
         "writeautomaticsub": subs,
     }
-
-    postprocessors = []
-    if audio_only:
-        postprocessors.append(
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": audio_format,
-                "preferredquality": "192",
-            }
-        )
-
-    if clip:
-        if "-" in clip:
-            start, end = clip.split("-", 1)
-            opts["external_downloader_args"] = {
-                "ffmpeg_i": ["-ss", start.strip(), "-to", end.strip()]
-            }
-
-    if postprocessors:
-        opts["postprocessors"] = postprocessors
-
+    if has_ffmpeg and not audio_only:
+        opts["merge_output_format"] = "mp4"
+    if audio_only and has_ffmpeg:
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": audio_format, "preferredquality": "192"}]
+    if clip and "-" in clip and has_ffmpeg:
+        start, end = clip.split("-", 1)
+        opts["external_downloader_args"] = {"ffmpeg_i": ["-ss", start.strip(), "-to", end.strip()]}
     return opts
-
 
 def download_url(
     url: str,
-    output_dir: Path = Path("./downloads"),
+    output_dir: Path = DEFAULT_DL_DIR,
     quality: str = "1080",
     audio_only: bool = False,
     audio_format: str = "mp3",
@@ -75,51 +56,15 @@ def download_url(
     subs: bool = False,
     info_only: bool = False,
 ) -> Dict[str, Any]:
-    """Downloads media from `url` using yt_dlp Python library or CLI fallback."""
-    opts = build_yt_dlp_options(
-        output_dir=output_dir,
-        quality=quality,
-        audio_only=audio_only,
-        audio_format=audio_format,
-        clip=clip,
-        subs=subs,
-        info_only=info_only,
-    )
-
-    try:
-        import yt_dlp  # type: ignore
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=not info_only)
-            summary = {
-                "id": info.get("id"),
-                "title": info.get("title"),
-                "uploader": info.get("uploader"),
-                "duration": info.get("duration"),
-                "webpage_url": info.get("webpage_url", url),
-                "output_dir": str(output_dir.resolve()),
-            }
-            if info_only:
-                print(json.dumps(summary, indent=2))
-            else:
-                print(f"✓ Downloaded: {summary['title']} -> {summary['output_dir']}")
-            return summary
-    except ImportError:
-        yt_bin = shutil.which("yt-dlp")
-        if not yt_bin:
-            raise RuntimeError(
-                "Neither `yt_dlp` Python package nor `yt-dlp` binary was found. "
-                "Install with: pip install yt-dlp"
-            )
-        cmd = [yt_bin, "-f", opts["format"], "-o", opts["outtmpl"], "--no-playlist"]
-        if audio_only:
-            cmd += ["-x", "--audio-format", audio_format]
-        if subs:
-            cmd += ["--write-subs", "--write-auto-subs"]
-        if clip:
-            cmd += ["--download-sections", f"*{clip}"]
-        if info_only:
-            cmd += ["--dump-json", "--skip-download"]
-        cmd.append(url)
-        subprocess.run(cmd, check=True)
-        return {"url": url, "output_dir": str(output_dir.resolve())}
+    ensure_dependencies(packages=["yt_dlp"])
+    if str(output_dir) in (".", "./downloads", "downloads"):
+        output_dir = DEFAULT_DL_DIR
+    opts = build_yt_dlp_options(output_dir, quality, audio_only, audio_format, clip, subs, info_only)
+    import yt_dlp
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=not info_only)
+        resolved_dir = str(output_dir.resolve())
+        print(f"\n✓ Saved to folder: {resolved_dir}")
+        if os.name == "nt" and not info_only:
+            subprocess.Popen(["explorer", resolved_dir])
+        return {"title": info.get("title"), "output_dir": resolved_dir}
