@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RELEASE_BIN="${SCRIPT_DIR}/target/release/kit"
+
+if [[ -x "${RELEASE_BIN}" ]]; then
+    exec "${RELEASE_BIN}" "$@"
+else
+    export PYTHONPATH="${SCRIPT_DIR}/python:${PYTHONPATH:-}"
+    exec python3 -m kit_py.cli "$@"
+fi
