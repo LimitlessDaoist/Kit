@@ -24,3 +24,5 @@ Thumbs.db
 # Kit runtime outputs
 downloads/
 *.tmp
+
+.kit_deps_ok
