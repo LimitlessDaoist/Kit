@@ -15,10 +15,12 @@ def ensure_dependencies(force: bool = False, packages: List[str] | None = None) 
     targets = packages if packages is not None else ["yt_dlp", "imageio_ffmpeg", "PIL", "pypdf", "qrcode"]
     missing_specs: List[str] = []
     for mod_name in targets:
-        pip_spec = REQUIRED_PACKAGES.get(mod_name, mod_name)
+        if mod_name not in REQUIRED_PACKAGES:
+            raise ValueError(f"Security policy: package '{mod_name}' is not in the allowed package list.")
+        pip_spec = REQUIRED_PACKAGES[mod_name]
         if force or importlib.util.find_spec(mod_name) is None:
             missing_specs.append(pip_spec)
     if not missing_specs:
         return
     print(f"[Kit] Auto-installing missing Python packages ({', '.join(missing_specs)})...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade"] + missing_specs, check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--upgrade"] + missing_specs, check=True)

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64, json, os, subprocess, tempfile, threading, webbrowser
+import base64, hmac, json, os, secrets, socket, subprocess, tempfile, threading, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict
@@ -9,7 +9,11 @@ from kit_py.net_speed import run_speedtest
 from kit_py.qr_tools import render_qr
 from kit_py.textract_tools import run_textract
 
-HTML_PAGE = """<!DOCTYPE html>
+SESSION_TOKEN = secrets.token_urlsafe(32)
+MAX_BODY_BYTES = 25 * 1024 * 1024
+ALLOWED_OCR_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".pdf"}
+
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -24,7 +28,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .brand { display:flex; align-items:center; gap:12px; }
   .logo { width:42px; height:42px; border-radius:10px; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:20px; color:#0b0f19; }
   h1 { font-size:24px; font-weight:700; }
-  .badge { background:rgba(56,189,248,0.15); color:var(--accent); border:1px solid rgba(56,189,248,0.3); padding:5px 12px; border-radius:999px; font-size:13px; font-weight:600; }
+  .badge { background:rgba(52,211,153,0.15); color:var(--success); border:1px solid rgba(52,211,153,0.3); padding:5px 12px; border-radius:999px; font-size:13px; font-weight:600; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(480px,1fr)); gap:22px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:22px; display:flex; flex-direction:column; gap:14px; box-shadow:0 8px 24px rgba(0,0,0,0.25); }
   .card h2 { font-size:18px; color:var(--accent); }
@@ -33,6 +37,7 @@ HTML_PAGE = """<!DOCTYPE html>
   input[type="text"], select, textarea { width:100%; background:#090d16; border:1px solid var(--border); color:var(--text); padding:10px 13px; border-radius:8px; font-size:14px; outline:none; }
   .row { display:flex; gap:10px; align-items:center; }
   button { background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#0b0f19; font-weight:700; border:none; padding:10px 16px; border-radius:8px; cursor:pointer; font-size:14px; white-space:nowrap; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
   button.secondary { background:#1e293b; color:var(--text); border:1px solid var(--border); font-weight:600; }
   .output { background:#070a12; border:1px solid var(--border); border-radius:8px; padding:12px; font-family:Consolas,monospace; font-size:13px; white-space:pre-wrap; word-break:break-all; min-height:54px; max-height:220px; overflow-y:auto; color:#cbd5e1; }
   .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:6px; }
@@ -48,12 +53,12 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="logo">K</div>
       <div>
         <h1>Kit Web Studio</h1>
-        <p style="font-size:13px;color:var(--muted);">Hybrid Rust + Python Local Dashboard</p>
+        <p style="font-size:13px;color:var(--muted);">CSRF-Protected Local Hybrid Dashboard</p>
       </div>
     </div>
     <div class="row">
       <button class="secondary" onclick="openDownloads()">Open Downloads Folder</button>
-      <span class="badge">Local Server Active</span>
+      <span class="badge">Secured Local Session</span>
     </div>
   </header>
   <div class="grid">
@@ -61,7 +66,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <h2>Video & Audio Downloader (kit dl)</h2>
       <p>Download MP4 video or MP3 audio from YouTube, TikTok, Twitch, X, and 1,000+ sites.</p>
       <div>
-        <label>Video or Playlist URL</label>
+        <label>Video or Playlist URL (http/https)</label>
         <input type="text" id="dl-url" placeholder="https://www.youtube.com/watch?v=...">
       </div>
       <div class="row">
@@ -76,7 +81,7 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     <div class="card">
       <h2>Network Speed Test (kit ns)</h2>
-      <p>Measure real-time Ping, Jitter, Download Mbps, and Upload Mbps via Cloudflare Edge.</p>
+      <p>Measure real-time Ping, Jitter, Download Mbps, and Upload Mbps across 4 parallel threads.</p>
       <div class="stats">
         <div class="stat-box"><div class="stat-lbl">Ping</div><div class="stat-val" id="ns-ping">--</div></div>
         <div class="stat-box"><div class="stat-lbl">Jitter</div><div class="stat-val" id="ns-jitter">--</div></div>
@@ -115,8 +120,13 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 </div>
 <script>
+const KIT_TOKEN = "__KIT_SESSION_TOKEN__";
 async function api(path, body) {
-  const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{}) });
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Kit-Token': KIT_TOKEN },
+    body: JSON.stringify(body || {})
+  });
   return await res.json();
 }
 async function openDownloads() { await api('/api/open-downloads', {}); }
@@ -138,7 +148,7 @@ async function runSpeedTest() {
   const out = document.getElementById('ns-out');
   const btn = document.getElementById('ns-btn');
   btn.disabled = true;
-  out.textContent = 'Testing ping, download, and upload speeds against Cloudflare Edge...';
+  out.textContent = 'Testing ping, download, and upload speeds...';
   try {
     const data = await api('/api/ns', { size_mb: 10 });
     if (data.error) out.textContent = 'Error: ' + data.error;
@@ -153,7 +163,7 @@ async function runSpeedTest() {
 }
 async function runOcrClip() {
   const out = document.getElementById('ocr-out');
-  out.value = 'Extracting text from clipboard image... (first run auto-installs OCR engine)...';
+  out.value = 'Extracting text from clipboard image...';
   const data = await api('/api/textract', { clip: true });
   out.value = data.error ? ('Error: ' + data.error) : (data.text || '[No text found]');
 }
@@ -162,7 +172,7 @@ async function runOcrFile() {
   const out = document.getElementById('ocr-out');
   if (!fileInput.files.length) { alert('Choose an image or PDF file first'); return; }
   const file = fileInput.files[0];
-  out.value = 'Processing ' + file.name + '... (first run auto-installs OCR engine)...';
+  out.value = 'Processing ' + file.name + '...';
   const reader = new FileReader();
   reader.onload = async () => {
     const b64 = reader.result.split(',')[1];
@@ -175,37 +185,81 @@ async function runQr() {
   const payload = document.getElementById('util-input').value.trim();
   const data = await api('/api/qr', { payload });
   document.getElementById('util-out').textContent = data.ascii || '';
-  if (data.png_b64) document.getElementById('qr-img-wrap').innerHTML = '<img src="data:image/png;base64,' + data.png_b64 + '" style="max-width:180px;border-radius:8px;margin-top:8px;">';
+  const wrap = document.getElementById('qr-img-wrap');
+  wrap.textContent = '';
+  if (data.png_b64) {
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + data.png_b64;
+    img.style.maxWidth = '180px';
+    img.style.borderRadius = '8px';
+    img.style.marginTop = '8px';
+    wrap.appendChild(img);
+  }
 }
 async function runEncode(mode) {
   const input = document.getElementById('util-input').value;
   const data = await api('/api/encode', { mode, input });
-  document.getElementById('qr-img-wrap').innerHTML = '';
+  document.getElementById('qr-img-wrap').textContent = '';
   document.getElementById('util-out').textContent = data.error ? ('Error: ' + data.error) : data.result;
 }
 </script>
 </body>
 </html>"""
 
+HTML_PAGE = HTML_TEMPLATE.replace("__KIT_SESSION_TOKEN__", SESSION_TOKEN)
+
+def is_authorized_request(headers: Any, server_port: int) -> tuple[bool, str]:
+    host = (headers.get("Host") or "").lower().strip()
+    allowed_hosts = {f"127.0.0.1:{server_port}", f"localhost:{server_port}", "127.0.0.1", "localhost"}
+    if host not in allowed_hosts:
+        return False, "Forbidden Host header (DNS rebinding protection)."
+    origin = (headers.get("Origin") or "").lower().strip()
+    if origin and origin not in {f"http://127.0.0.1:{server_port}", f"http://localhost:{server_port}"}:
+        return False, "Forbidden Cross-Origin request."
+    provided_token = headers.get("X-Kit-Token") or ""
+    if not hmac.compare_digest(provided_token, SESSION_TOKEN):
+        return False, "Missing or invalid X-Kit-Token (CSRF protection)."
+    return True, "ok"
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
 class KitUiHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass
+    def _add_security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';")
     def _send_json(self, data: Dict[str, Any], status: int = 200) -> None:
         raw = json.dumps(data).encode("utf-8")
         self.send_response(status)
+        self._add_security_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
     def do_GET(self) -> None:
-        raw = HTML_PAGE.encode("utf-8")
+        if self.path not in {"/", "/index.html"}:
+            self._send_json({"error": "Not found"}, status=404)
+            return
+        raw = HTML_TEMPLATE.replace("__KIT_SESSION_TOKEN__", SESSION_TOKEN).encode("utf-8")
         self.send_response(200)
+        self._add_security_headers()
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
     def do_POST(self) -> None:
+        ok, reason = is_authorized_request(self.headers, self.server.server_port)
+        if not ok:
+            self._send_json({"error": reason}, status=403)
+            return
         length = int(self.headers.get("Content-Length", "0"))
+        if length > MAX_BODY_BYTES:
+            self._send_json({"error": "Payload exceeds 25 MB limit."}, status=413)
+            return
         body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         try:
             if self.path == "/api/open-downloads":
@@ -214,7 +268,7 @@ class KitUiHandler(BaseHTTPRequestHandler):
                     subprocess.Popen(["explorer", str(DEFAULT_DL_DIR.resolve())])
                 self._send_json({"ok": True})
             elif self.path == "/api/dl":
-                res = download_url(url=body["url"], quality=body.get("quality", "720"), audio_only=bool(body.get("audio_only", False)))
+                res = download_url(url=str(body.get("url", "")), quality=str(body.get("quality", "720")), audio_only=bool(body.get("audio_only", False)), open_folder=True)
                 self._send_json(res)
             elif self.path == "/api/ns":
                 res = run_speedtest(size_mb=int(body.get("size_mb", 10)), as_json=True)
@@ -223,7 +277,9 @@ class KitUiHandler(BaseHTTPRequestHandler):
                 if body.get("clip"):
                     text = run_textract(from_clipboard=True)
                 else:
-                    suffix = Path(body.get("filename", "upload.png")).suffix or ".png"
+                    suffix = Path(str(body.get("filename", "upload.png"))).suffix.lower() or ".png"
+                    if suffix not in ALLOWED_OCR_EXTS:
+                        raise ValueError(f"Unsupported file extension '{suffix}'.")
                     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                         tmp.write(base64.b64decode(body["data_b64"]))
                         tmp_path = Path(tmp.name)
@@ -236,23 +292,31 @@ class KitUiHandler(BaseHTTPRequestHandler):
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                     tmp_path = Path(tmp.name)
                 try:
-                    ascii_art = render_qr(body.get("payload", "https://kit.local"), output=tmp_path)
+                    ascii_art = render_qr(str(body.get("payload", "https://kit.local"))[:2048], output=tmp_path)
                     b64 = base64.b64encode(tmp_path.read_bytes()).decode("ascii")
                 finally:
                     tmp_path.unlink(missing_ok=True)
                 self._send_json({"ascii": ascii_art, "png_b64": b64})
             elif self.path == "/api/encode":
-                res = run_encode(body["mode"], body.get("input"))
+                res = run_encode(str(body["mode"]), body.get("input"))
                 self._send_json({"result": res})
             else:
                 self._send_json({"error": "Unknown endpoint"}, status=404)
         except Exception as exc:
-            self._send_json({"error": str(exc)}, status=500)
+            self._send_json({"error": str(exc)}, status=400)
+
+def find_available_port(preferred: int = 8420) -> int:
+    for candidate in range(preferred, preferred + 15):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", candidate)) != 0:
+                return candidate
+    return preferred
 
 def launch_ui(port: int = 8420, open_browser: bool = True) -> None:
-    url = f"http://127.0.0.1:{port}"
-    server = ThreadingHTTPServer(("127.0.0.1", port), KitUiHandler)
-    print(f"Kit Web Studio running at: {url}")
+    actual_port = find_available_port(port)
+    url = f"http://127.0.0.1:{actual_port}"
+    server = ReusableThreadingHTTPServer(("127.0.0.1", actual_port), KitUiHandler)
+    print(f"Kit Web Studio running at: {url} (CSRF & DNS-Rebinding protection active)")
     print("Press Ctrl+C in this terminal to stop the server.")
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
