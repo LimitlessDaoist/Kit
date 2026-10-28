@@ -37,8 +37,7 @@ def inspect_or_strip_meta(
                     metadata[f"Info.{k}"] = str(v)[:200]
             if strip:
                 cleaned_path = (output_path or resolved.with_name(f"{resolved.stem}_clean{ext}")).resolve()
-                clean_img = Image.new(img.mode, img.size)
-                clean_img.putdata(list(img.getdata()))
+                clean_img = Image.frombytes(img.mode, img.size, img.tobytes())
                 cleaned_path.parent.mkdir(parents=True, exist_ok=True)
                 clean_img.save(cleaned_path)
     elif ext == ".pdf":
@@ -77,3 +76,4 @@ def inspect_or_strip_meta(
         if cleaned_path:
             print(f"\nStripped all metadata -> {cleaned_path}")
     return result
+

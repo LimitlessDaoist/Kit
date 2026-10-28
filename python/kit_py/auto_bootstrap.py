@@ -1,6 +1,10 @@
 from __future__ import annotations
-import importlib.util, subprocess, sys
-from typing import Dict, List
+import importlib.util, os, shutil, subprocess, sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+MAX_IMAGE_PIXELS = 64_000_000
+DEFAULT_DL_DIR = Path("D:/kit/downloads") if os.name == "nt" else Path("./downloads")
 
 REQUIRED_PACKAGES: Dict[str, str] = {
     "yt_dlp": "yt-dlp>=2024.8.6",
@@ -25,3 +29,26 @@ def ensure_dependencies(force: bool = False, packages: List[str] | None = None) 
         return
     print(f"[Kit] Auto-installing missing Python packages ({', '.join(missing_specs)})...")
     subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--upgrade"] + missing_specs, check=True)
+
+def get_ffmpeg_path() -> Optional[str]:
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        return sys_ffmpeg
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+def copy_to_clipboard(text: str) -> bool:
+    try:
+        if os.name == "nt":
+            subprocess.run(["clip"], input=text.encode("utf-16le"), check=True)
+            return True
+        for cmd in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"]):
+            if shutil.which(cmd[0]):
+                subprocess.run(cmd, input=text.encode("utf-8"), check=True)
+                return True
+    except Exception:
+        pass
+    return False

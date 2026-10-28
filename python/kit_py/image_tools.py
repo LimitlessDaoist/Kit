@@ -42,9 +42,7 @@ def process_image(
             work_img = work_img.resize(new_dims, Image.Resampling.LANCZOS)
 
         if strip_exif:
-            clean = Image.new(work_img.mode, work_img.size)
-            clean.putdata(list(work_img.getdata()))
-            work_img = clean
+            work_img = Image.frombytes(work_img.mode, work_img.size, work_img.tobytes())
 
         if output_path is None:
             ext = f".{target_format.lower().lstrip('.')}" if target_format else input_path.suffix
@@ -63,7 +61,8 @@ def process_image(
         work_img.save(output_path, format=pil_fmt, **save_kwargs)
 
     print(
-        f"✓ Image processed: {input_path.name} ({orig_size[0]}x{orig_size[1]}) -> "
+        f"??? Image processed: {input_path.name} ({orig_size[0]}x{orig_size[1]}) -> "
         f"{output_path} ({work_img.size[0]}x{work_img.size[1]})"
     )
     return output_path
+

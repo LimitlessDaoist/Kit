@@ -1,26 +1,26 @@
 from __future__ import annotations
-import subprocess, tempfile
+import tempfile
 from pathlib import Path
-from typing import Optional
-from kit_py.auto_bootstrap import ensure_dependencies
+from typing import Any, Optional
+from kit_py.auto_bootstrap import MAX_IMAGE_PIXELS, copy_to_clipboard, ensure_dependencies
 
-MAX_IMAGE_PIXELS = 64_000_000
+_OCR_ENGINE: Any = None
 
-def copy_to_clipboard(text: str) -> None:
-    try:
-        subprocess.run(["clip"], input=text.encode("utf-16le"), check=True)
-        print("Copied extracted text to clipboard!")
-    except Exception:
-        pass
+def _get_ocr_engine() -> Any:
+    global _OCR_ENGINE
+    if _OCR_ENGINE is None:
+        ensure_dependencies(packages=["PIL", "rapidocr_onnxruntime"])
+        from rapidocr_onnxruntime import RapidOCR
+        _OCR_ENGINE = RapidOCR()
+    return _OCR_ENGINE
 
 def extract_text_from_image(image_path: Path) -> str:
     ensure_dependencies(packages=["PIL", "rapidocr_onnxruntime"])
     from PIL import Image
-    from rapidocr_onnxruntime import RapidOCR
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     with Image.open(image_path) as img:
         img.verify()
-    engine = RapidOCR()
+    engine = _get_ocr_engine()
     result, _ = engine(str(image_path.resolve()))
     if not result:
         return ""
@@ -75,6 +75,6 @@ def run_textract(
         print(f"Saved extracted text to {resolved_out}")
     else:
         print(extracted if extracted else "[No text detected]")
-    if copy_result and extracted:
-        copy_to_clipboard(extracted)
+    if copy_result and extracted and copy_to_clipboard(extracted):
+        print("Copied extracted text to clipboard!")
     return extracted

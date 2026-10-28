@@ -1,5 +1,5 @@
 from __future__ import annotations
-import getpass, math, os, secrets, string, subprocess
+import getpass, math, os, secrets, stat, string, subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from kit_py.auto_bootstrap import ensure_dependencies
@@ -158,6 +158,10 @@ def shred_file(target_path: Path, passes: int = 3) -> Dict[str, Any]:
     size = resolved.stat().st_size
     if size > MAX_SHRED_FILE_BYTES:
         raise ValueError("File exceeds 2 GB safety limit.")
+    try:
+        os.chmod(resolved, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
     chunk_size = 64 * 1024
     with open(resolved, "r+b", buffering=0) as f:
         for p in range(passes):
@@ -175,3 +179,4 @@ def shred_file(target_path: Path, passes: int = 3) -> Dict[str, Any]:
     obfuscated.unlink()
     print(f"Shredded and destroyed '{resolved.name}' ({size} bytes, {passes} passes).")
     return {"shredded": str(resolved), "bytes": size, "passes": passes}
+

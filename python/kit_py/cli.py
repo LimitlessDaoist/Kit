@@ -2,19 +2,7 @@ from __future__ import annotations
 import argparse, sys
 from pathlib import Path
 from typing import List, Optional
-from kit_py.audio_tools import run_audio_extract, run_silence_strip
-from kit_py.auto_bootstrap import ensure_dependencies
-from kit_py.image_tools import process_image
-from kit_py.media_conv import convert_media
-from kit_py.media_dl import DEFAULT_DL_DIR, download_url
-from kit_py.meta_tools import inspect_or_strip_meta
-from kit_py.native_fallback import run_dedup, run_doctor, run_encode, run_hash, run_json
-from kit_py.net_speed import run_speedtest
-from kit_py.pdf_tools import extract_pdf_text, merge_pdfs, split_pdf
-from kit_py.qr_tools import render_qr
-from kit_py.security_tools import decrypt_file, encrypt_file, generate_passwords, shred_file
-from kit_py.textract_tools import run_textract
-from kit_py.web_ui import launch_ui
+from kit_py.auto_bootstrap import DEFAULT_DL_DIR
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kit", description="Kit: Fast Hybrid (Rust + Python) All-in-One CLI & Web Workstation")
@@ -143,54 +131,71 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    cmd = args.command
     try:
-        if args.command == "setup":
+        if cmd == "setup":
+            from kit_py.auto_bootstrap import ensure_dependencies
             ensure_dependencies(force=True)
-        elif args.command == "dl":
+        elif cmd == "dl":
+            from kit_py.media_dl import download_url
             download_url(args.url, args.output_dir, args.quality, args.audio_only, args.audio_format, args.clip, args.subs, args.info_only)
-        elif args.command == "audio":
+        elif cmd == "audio":
+            from kit_py.audio_tools import run_audio_extract
             run_audio_extract(args.source, args.output, args.format, args.bitrate, args.normalize)
-        elif args.command == "silence":
+        elif cmd == "silence":
+            from kit_py.audio_tools import run_silence_strip
             run_silence_strip(args.input, args.output, args.threshold_db, args.min_silence)
-        elif args.command == "pass":
-            generate_passwords(args.length, not args.no_symbols, args.passphrase, args.words, args.count, args.copy)
-        elif args.command == "encrypt":
-            encrypt_file(args.input, args.output, args.password)
-        elif args.command == "decrypt":
-            decrypt_file(args.input, args.output, args.password)
-        elif args.command == "shred":
-            shred_file(args.target, args.passes)
-        elif args.command == "meta":
+        elif cmd in {"pass", "encrypt", "decrypt", "shred"}:
+            from kit_py.security_tools import decrypt_file, encrypt_file, generate_passwords, shred_file
+            if cmd == "pass":
+                generate_passwords(args.length, not args.no_symbols, args.passphrase, args.words, args.count, args.copy)
+            elif cmd == "encrypt":
+                encrypt_file(args.input, args.output, args.password)
+            elif cmd == "decrypt":
+                decrypt_file(args.input, args.output, args.password)
+            else:
+                shred_file(args.target, args.passes)
+        elif cmd == "meta":
+            from kit_py.meta_tools import inspect_or_strip_meta
             inspect_or_strip_meta(args.input, args.strip, args.output, args.json)
-        elif args.command == "ns":
+        elif cmd == "ns":
+            from kit_py.net_speed import run_speedtest
             run_speedtest(size_mb=args.size_mb, as_json=args.json)
-        elif args.command == "textract":
+        elif cmd == "textract":
+            from kit_py.textract_tools import run_textract
             run_textract(args.input, args.clip, args.output, args.copy)
-        elif args.command == "ui":
+        elif cmd == "ui":
+            from kit_py.web_ui import launch_ui
             launch_ui(port=args.port, open_browser=not args.no_open)
-        elif args.command == "media":
+        elif cmd == "media":
+            from kit_py.media_conv import convert_media
             convert_media(args.input, args.output, start=args.start, end=args.end, crf=args.crf)
-        elif args.command == "img":
+        elif cmd == "img":
+            from kit_py.image_tools import process_image
             process_image(args.input, output_path=args.output, target_format=args.format, resize_spec=args.resize, quality=args.quality, strip_exif=args.strip_exif)
-        elif args.command == "pdf":
+        elif cmd == "pdf":
+            from kit_py.pdf_tools import extract_pdf_text, merge_pdfs, split_pdf
             if args.pdf_action == "merge":
                 merge_pdfs(args.inputs, args.output)
             elif args.pdf_action == "split":
                 split_pdf(args.input, args.pages, args.output)
             elif args.pdf_action == "text":
                 extract_pdf_text(args.input, args.output)
-        elif args.command == "qr":
+        elif cmd == "qr":
+            from kit_py.qr_tools import render_qr
             render_qr(args.payload, args.output)
-        elif args.command == "hash":
-            run_hash(args.files, algo=args.algo, check=args.check)
-        elif args.command == "dedup":
-            run_dedup(args.dir, min_size=args.min_size, as_json=args.json)
-        elif args.command == "encode":
-            run_encode(args.mode, args.input)
-        elif args.command == "json":
-            run_json(args.input, minify=args.minify, query=args.query)
-        elif args.command == "doctor":
-            run_doctor()
+        elif cmd in {"hash", "dedup", "encode", "json", "doctor"}:
+            from kit_py.native_fallback import run_dedup, run_doctor, run_encode, run_hash, run_json
+            if cmd == "hash":
+                run_hash(args.files, algo=args.algo, check=args.check)
+            elif cmd == "dedup":
+                run_dedup(args.dir, min_size=args.min_size, as_json=args.json)
+            elif cmd == "encode":
+                run_encode(args.mode, args.input)
+            elif cmd == "json":
+                run_json(args.input, minify=args.minify, query=args.query)
+            else:
+                run_doctor()
         return 0
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
