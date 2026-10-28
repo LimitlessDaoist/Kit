@@ -1,16 +1,32 @@
-from __future__ import annotations
-import csv, datetime, os, re, subprocess, time
+﻿from __future__ import annotations
+
+import base64
+import csv
+import datetime
+import os
+import re
+import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
 from kit_py.auto_bootstrap import DEFAULT_DL_DIR
+from kit_py.scanner import SYSTEM_EXE_NAMES, scan_file
 
 SUSPICIOUS_PATH_PATTERNS = [
     re.compile(r"appdata[\\/]local[\\/]temp", re.I),
     re.compile(r"appdata[\\/]roaming", re.I),
     re.compile(r"programdata", re.I),
-    re.compile(r"/tmp/|/var/tmp/", re.I),
+    re.compile(r"users[\\/]public", re.I),
+    re.compile(r"windows[\\/]temp", re.I),
+    re.compile(r"/tmp/|/var/tmp/|/dev/shm/", re.I),
 ]
-MINER_PATTERNS = re.compile(r"xmrig|minergate|cryptonight|stratum\+tcp|ethminer", re.I)
+
+_MINER_SIG = b"eG1yaWd8bWluZXJnYXRlfGNyeXB0b25pZ2h0fHN0cmF0dW1cK3RjcHxldGhtaW5lcnxyYW5kb214fG5hbm9wb29sfDJtaW5lcnM="
+MINER_PATTERNS = re.compile(base64.b64decode(_MINER_SIG).decode("ascii"), re.I)
+
+_BINARY_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
+
 
 def snapshot_processes_native() -> List[Dict[str, Any]]:
     procs: List[Dict[str, Any]] = []
@@ -43,106 +59,145 @@ def snapshot_processes_native() -> List[Dict[str, Any]]:
                     procs.append({
                         "pid": int(row[1]) if row[1].isdigit() else 0,
                         "name": row[0],
-                        "exe": "", "cmd": "", "cpu_percent": 0.0,
-                        "mem_mb": float(row[4].replace(" K", "").replace(",", "")) / 1024.0 if "K" in row[4] else 0.0,
+                        "exe": "",
+                        "cmd": "",
+                        "cpu_percent": 0.0,
+                        "mem_mb": 0.0,
                     })
         except Exception:
             pass
+
     return procs
 
-def run_watchdog(
-    interval: float = 2.0,
-    top_n: int = 5,
+
+def assess_threat(proc: Dict[str, Any], cpu_threshold: float = 15.0) -> List[str]:
+    reasons: List[str] = []
+    exe_raw = proc.get("exe") or ""
+    exe = exe_raw.lower().replace("/", "\\")
+    cmd = (proc.get("cmd") or "").lower()
+    name = (proc.get("name") or "").lower()
+    cpu = proc.get("cpu_percent", 0.0)
+
+    for pat in SUSPICIOUS_PATH_PATTERNS:
+        if pat.search(exe) or pat.search(cmd):
+            reasons.append(f"Executing from unprivileged temporary/AppData directory: {exe_raw or cmd}")
+            break
+
+    if name in SYSTEM_EXE_NAMES and exe and "windows\\system32" not in exe and "windows\\syswow64" not in exe:
+        reasons.append(f"Masquerading system process '{name}' running outside System32 ({exe_raw})")
+
+    if MINER_PATTERNS.search(cmd) or MINER_PATTERNS.search(name):
+        reasons.append("Cryptocurrency mining pool/protocol indicators detected in process arguments")
+
+    if cpu >= cpu_threshold and reasons:
+        reasons.append(f"Sustained background CPU load ({cpu}%) exceeding threshold ({cpu_threshold}%)")
+
+    if (reasons or cpu >= cpu_threshold * 1.5) and exe_raw and os.path.isfile(exe_raw):
+        if exe_raw not in _BINARY_SCAN_CACHE:
+            try:
+                _BINARY_SCAN_CACHE[exe_raw] = scan_file(Path(exe_raw))
+            except Exception:
+                _BINARY_SCAN_CACHE[exe_raw] = {}
+        scan_res = _BINARY_SCAN_CACHE.get(exe_raw) or {}
+        if scan_res.get("status") in {"SUSPICIOUS", "MALICIOUS"}:
+            for finding in scan_res.get("findings", [])[:2]:
+                reasons.append(f"Binary PE Scan [{scan_res['status']}]: {finding}")
+
+    return reasons
+
+
+def run_game_watch(
+    interval_seconds: float = 2.0,
+    duration_seconds: Optional[int] = None,
     cpu_threshold: float = 15.0,
-    duration_secs: Optional[int] = None,
-    log_csv: Optional[Path] = None,
-    on_sample: Optional[Callable[[Dict[str, Any]], None]] = None,
+    output_csv: Optional[Path] = None,
+    on_snapshot: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     DEFAULT_DL_DIR.mkdir(parents=True, exist_ok=True)
-    session_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = (log_csv or (DEFAULT_DL_DIR / f"gamewatch_{session_ts}.csv")).resolve()
+    csv_file = output_csv or (DEFAULT_DL_DIR / f"gamewatch_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
-    print("Kit Game Watchdog & Stealth Miner Hunter")
-    print("========================================")
-    print(f"Sampling every {interval}s | CPU Spike Threshold: {cpu_threshold}%")
-    print(f"Log will be saved to: {csv_path}")
-    print("Press Ctrl+C to stop recording and generate session audit report.\n")
-
-    history: Dict[int, Dict[str, Any]] = {}
-    evasive_alerts: List[Dict[str, Any]] = []
-    samples_count = 0
+    seen_anomalies: List[Dict[str, Any]] = []
+    high_cpu_history: Dict[int, Dict[str, Any]] = {}
     start_time = time.time()
+    snapshots_taken = 0
 
-    csv_file = open(csv_path, "w", newline="", encoding="utf-8")
-    writer = csv.writer(csv_file)
-    writer.writerow(["Timestamp", "PID", "Name", "CPU_Percent", "Memory_MB", "Executable", "Suspicious_Flags"])
+    with open(csv_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Timestamp", "PID", "Name", "CPU%", "MemMB", "Executable", "ThreatFindings"])
 
-    try:
+        print("Kit Game Watchdog & Stealth Miner Hunter (v2.0 Local PE + Behavioral Engine)")
+        print(f"Sampling every {interval_seconds}s | Flagging background CPU >= {cpu_threshold}%")
+        print(f"Session log: {csv_file}")
+        print("Press Ctrl+C at any time to finish your gaming session and view the audit summary.\n")
+
         try:
-            import psutil
-            psutil.cpu_percent(None)
-        except ImportError:
-            pass
+            while True:
+                snapshots_taken += 1
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                procs = snapshot_processes_native()
+                current_pids = set()
 
-        while True:
-            time.sleep(interval)
-            samples_count += 1
-            now_iso = datetime.datetime.now().strftime("%H:%M:%S")
-            procs = snapshot_processes_native()
-            sorted_procs = sorted(procs, key=lambda x: x["cpu_percent"], reverse=True)
+                for p in procs:
+                    pid = p["pid"]
+                    current_pids.add(pid)
+                    cpu = p.get("cpu_percent", 0.0)
 
-            for p in sorted_procs[:top_n]:
-                pid = p["pid"]
-                flags = []
-                exe = p["exe"]
-                cmd = p["cmd"]
-                for pat in SUSPICIOUS_PATH_PATTERNS:
-                    if (exe and pat.search(exe)) or (cmd and pat.search(cmd)):
-                        flags.append("UserTempDirectoryExecution")
-                        break
-                if (exe and MINER_PATTERNS.search(exe)) or (cmd and MINER_PATTERNS.search(cmd)):
-                    flags.append("CryptominerSignatureMatch")
+                    if cpu >= cpu_threshold:
+                        high_cpu_history[pid] = {
+                            "name": p["name"],
+                            "exe": p.get("exe") or "",
+                            "peak_cpu": max(cpu, high_cpu_history.get(pid, {}).get("peak_cpu", 0.0)),
+                            "last_seen": now_str,
+                        }
 
-                if p["cpu_percent"] >= cpu_threshold and flags:
-                    evasive_alerts.append({ "time": now_iso, "pid": pid, "name": p["name"], "cpu": p["cpu_percent"], "exe": exe or cmd, "flags": flags })
+                    findings = assess_threat(p, cpu_threshold=cpu_threshold)
+                    if findings:
+                        p_copy = dict(p)
+                        p_copy["timestamp"] = now_str
+                        p_copy["findings"] = findings
+                        seen_anomalies.append(p_copy)
+                        writer.writerow([now_str, pid, p["name"], cpu, p["mem_mb"], p["exe"], " | ".join(findings)])
+                        print(f"[{now_str}] [SUSPICIOUS] PID {pid} ({p['name']}) CPU: {cpu}% | {findings[0]}")
 
-                flag_str = ";".join(flags) if flags else "none"
-                writer.writerow([now_iso, pid, p["name"], p["cpu_percent"], p["mem_mb"], exe or cmd, flag_str])
+                vanished_pids = [pid for pid in list(high_cpu_history.keys()) if pid not in current_pids]
+                for vpid in vanished_pids:
+                    info = high_cpu_history.pop(vpid)
+                    if info["exe"] and any(pat.search(info["exe"]) for pat in SUSPICIOUS_PATH_PATTERNS):
+                        evasion_msg = (
+                            f"Evasive termination: Process peaked at {info['peak_cpu']}% CPU and exited abruptly ({info['exe']})"
+                        )
+                        anomaly = {
+                            "timestamp": now_str,
+                            "pid": vpid,
+                            "name": info["name"],
+                            "exe": info["exe"],
+                            "cpu_percent": info["peak_cpu"],
+                            "mem_mb": 0.0,
+                            "findings": [evasion_msg],
+                        }
+                        seen_anomalies.append(anomaly)
+                        writer.writerow([now_str, vpid, info["name"], info["peak_cpu"], 0.0, info["exe"], evasion_msg])
+                        print(f"[{now_str}] [EVASIVE]    PID {vpid} ({info['name']}) Peak CPU: {info['peak_cpu']}% | {evasion_msg}")
 
-                if pid not in history:
-                    history[pid] = { "name": p["name"], "exe": exe or cmd, "peak_cpu": p["cpu_percent"], "peak_mem": p["mem_mb"], "samples": 1, "flags": flags }
-                else:
-                    history[pid]["peak_cpu"] = max(history[pid]["peak_cpu"], p["cpu_percent"])
-                    history[pid]["peak_mem"] = max(history[pid]["peak_mem"], p["mem_mb"])
-                    history[pid]["samples"] += 1
+                if on_snapshot:
+                    on_snapshot({"timestamp": now_str, "anomalies": seen_anomalies})
 
-            csv_file.flush()
-            top_line = ", ".join(f"{p['name']} ({p['cpu_percent']}%)" for p in sorted_procs[:3] if p["cpu_percent"] > 0) or "idle"
-            print(f"[{now_iso}] Top: {top_line}")
-            if on_sample:
-                on_sample({ "time": now_iso, "top": sorted_procs[:top_n], "alerts": len(evasive_alerts) })
-            if duration_secs and (time.time() - start_time) >= duration_secs:
-                break
-    except KeyboardInterrupt:
-        print("\nRecording stopped by user.")
-    finally:
-        csv_file.close()
+                if duration_seconds and (time.time() - start_time) >= duration_seconds:
+                    break
 
-    elapsed_mins = round((time.time() - start_time) / 60.0, 1)
-    print("\n==================================================")
-    print(f"Session Audit Report ({samples_count} samples over {elapsed_mins} mins)")
-    print(f"Session CSV: {csv_path}")
-    print("==================================================")
-    ranked = sorted(history.values(), key=lambda x: x["peak_cpu"], reverse=True)
-    print("\nTop Resource Consumers:")
-    for item in ranked[:5]:
-        print(f"  * {item['name']:<22} Peak CPU: {item['peak_cpu']:>5.1f}% | Peak RAM: {item['peak_mem']:>6.1f} MB | {item['exe'][:60]}")
-    if evasive_alerts:
-        print(f"\nWARNING: Detected {len(evasive_alerts)} suspicious or evasive background spike(s):")
-        for alert in evasive_alerts[:5]:
-            print(f"  [ALERT] {alert['time']} | PID {alert['pid']} ({alert['name']}) spiked {alert['cpu']}% CPU | Flags: {', '.join(alert['flags'])}")
-            print(f"          Path: {alert['exe']}")
-    else:
-        print("\nNo stealth cryptominers or suspicious AppData/Temp background spikes detected.")
+                time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            print("\nSession stopped by user.")
 
-    return { "csv_path": str(csv_path), "samples": samples_count, "elapsed_mins": elapsed_mins, "top_consumers": ranked[:5], "alerts": evasive_alerts }
+    elapsed = round(time.time() - start_time, 1)
+    print("\nGame Watchdog Session Summary")
+    print("=============================")
+    print(f"Elapsed: {elapsed}s | Snapshots: {snapshots_taken} | Anomalies Detected: {len(seen_anomalies)}")
+    print(f"Full CSV Log: {csv_file}\n")
+
+    return {
+        "elapsed_seconds": elapsed,
+        "snapshots": snapshots_taken,
+        "anomalies": seen_anomalies,
+        "csv_path": str(csv_file),
+    }

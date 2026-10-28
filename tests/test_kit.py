@@ -1,3 +1,4 @@
+﻿import base64
 import json
 import tempfile
 import unittest
@@ -73,7 +74,7 @@ class TestKitToolkit(unittest.TestCase):
         png_out = self.root / "qr.png"
         ascii_qr = render_qr("https://example.com", output=png_out)
         self.assertTrue(png_out.exists())
-        self.assertIn("██", ascii_qr)
+        self.assertIn("â–ˆâ–ˆ", ascii_qr)
 
     def test_hash_dedup_encode_json(self):
         f1 = self.root / "one.txt"
@@ -105,3 +106,4 @@ class TestKitToolkit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
