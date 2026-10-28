@@ -8,11 +8,12 @@ REQUIRED_PACKAGES: Dict[str, str] = {
     "PIL": "Pillow>=10.0.0",
     "pypdf": "pypdf>=4.0.0",
     "qrcode": "qrcode>=7.4.2",
+    "cryptography": "cryptography>=42.0.0",
     "rapidocr_onnxruntime": "rapidocr-onnxruntime>=1.3.0",
 }
 
 def ensure_dependencies(force: bool = False, packages: List[str] | None = None) -> None:
-    targets = packages if packages is not None else ["yt_dlp", "imageio_ffmpeg", "PIL", "pypdf", "qrcode"]
+    targets = packages if packages is not None else ["yt_dlp", "imageio_ffmpeg", "PIL", "pypdf", "qrcode", "cryptography"]
     missing_specs: List[str] = []
     for mod_name in targets:
         if mod_name not in REQUIRED_PACKAGES:
